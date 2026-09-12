@@ -30,7 +30,7 @@ setup(
     maintainer="TeamKAI public-release staging",
     maintainer_email="maintainer@example.invalid",
     description="Public staging of the canonical Stanley-Pure Pursuit rule driver.",
-    license="Apache-2.0",
+    license="UNLICENSED",
     entry_points={
         "console_scripts": [
             "canonical_stanley_pursuit_driver = xycar_rule_drive.canonical_stanley_pursuit_driver:main",

@@ -5,7 +5,7 @@
   <version>0.0.0</version>
   <description>Public staging of the LR-ASPP canonical-road perception path.</description>
   <maintainer email="maintainer@example.invalid">TeamKAI public-release staging</maintainer>
-  <license>Apache-2.0</license>
+  <license>UNLICENSED</license>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>

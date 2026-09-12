@@ -66,7 +66,8 @@ The original final launcher is **SUPPORTING** evidence, not copied source: it al
 
 ## Remaining Issues
 
-- Select a project license before publishing.
+- Package metadata is `UNLICENSED`; this portfolio repository grants no separate
+  open-source reuse license. Third-party dependency terms remain in force.
 - Confirm whether the LR-ASPP model weight may be redistributed; it is currently excluded.
 - Obtain the exact competition-day launch/deployment record before adding mission, traffic, obstacle, stop-line, or cone modules.
 - Repeat full vehicle validation only with a locally measured camera, steering, speed, and vehicle-interface configuration.

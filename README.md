@@ -1,5 +1,9 @@
 # Kookmin Final – Rule-based Autonomous Driving
 
+This repository is provided for portfolio and research demonstration purposes.
+No separate open-source reuse license is granted; third-party dependencies keep
+their own terms.
+
 ## Overview
 
 This is a public-source staging repository for the real-vehicle Rule-based Autonomous Driving System prepared for the Kookmin autonomous-driving competition final. It contains the audited centerline-perception and vehicle-control path only. Competition assets, model weights, calibration files, bags, media, and source that was not verified as part of this path are intentionally absent.

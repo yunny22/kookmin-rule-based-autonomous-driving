@@ -20,7 +20,7 @@ setup(
     description=(
         "LR-ASPP MobileNetV3 lane segmentation and canonical road perception"
     ),
-    license="Apache-2.0",
+    license="UNLICENSED",
     entry_points={
         "console_scripts": [
             (
