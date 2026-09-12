@@ -32,7 +32,7 @@ The original final launcher is **SUPPORTING** evidence, not copied source: it al
 
 | Scope | Classification | Basis |
 | --- | --- | --- |
-| LR-ASPP/canonical and fused-control source portions | PERSONAL | Selected-commit history attributes relevant code portions to `as <as@local>` |
+| LR-ASPP/canonical and fused-control source portions | PERSONAL | Selected-commit history attributes relevant code portions to one local author identity |
 | Rule-path assembly | CO-DEVELOPED | The final launcher belongs to a broader team workspace and selects shared packages |
 | Vehicle deployment and competition operation | TEAM | The retained source does not establish individual ownership of the complete vehicle system |
 | ROS 2, OpenCV, NumPy, PyTorch, and external message interfaces | THIRD-PARTY / EXTERNAL | Runtime dependencies are referenced but their source is not copied |
@@ -73,7 +73,12 @@ The original final launcher is **SUPPORTING** evidence, not copied source: it al
 
 ## Attribution boundary
 
-Git blame at the selected commit associates portions of the retained perception/canonical and controller fusion code with `as <as@local>`. That evidence supports source-level **PERSONAL** contribution only. The final competition system and its result are **TEAM** work; perception-control integration is presented as **CO-DEVELOPED**. No unaudited mission module is claimed as an individual contribution.
+Git blame at the selected commit associates portions of the retained
+perception/canonical and controller fusion code with one local author identity.
+That evidence supports source-level **PERSONAL** contribution only. The final
+competition system and its result are **TEAM** work; perception-control
+integration is presented as **CO-DEVELOPED**. No unaudited mission module is
+claimed as an individual contribution.
 
 ## Release status
 
