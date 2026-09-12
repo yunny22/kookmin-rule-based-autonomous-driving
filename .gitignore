@@ -1,0 +1,39 @@
+# ROS 2 build products
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Private vehicle and model artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+*.bag
+*.db3
+*.mcap
+*.mp4
+*.mov
+*.avi
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.zip
+*.tar
+*.tar.gz
+*.local.yaml
+*.local.yml
+config/vehicle.local.yaml
+datasets/
+recordings/
+
+# Local editor and environment files
+.env
+.venv/
+.vscode/
+.idea/
