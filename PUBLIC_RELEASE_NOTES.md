@@ -66,7 +66,7 @@ The original final launcher is **SUPPORTING** evidence, not copied source: it al
 
 ## Remaining Issues
 
-- Confirm team permission and a license decision before publishing.
+- Select a project license before publishing.
 - Confirm whether the LR-ASPP model weight may be redistributed; it is currently excluded.
 - Obtain the exact competition-day launch/deployment record before adding mission, traffic, obstacle, stop-line, or cone modules.
 - Repeat full vehicle validation only with a locally measured camera, steering, speed, and vehicle-interface configuration.
