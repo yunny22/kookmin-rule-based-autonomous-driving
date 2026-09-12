@@ -1,19 +1,21 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>xycar_rule_drive</name>
+  <name>xycar_map_nav</name>
   <version>0.2.0</version>
-  <description>Sanitized Pure Pursuit–Stanley RULE controller for a portfolio release.</description>
+  <description>Sanitized final mission arbitration and command-gate source.</description>
   <maintainer email="team.kai@example.com">TeamKAI</maintainer>
   <license>UNLICENSED</license>
   <buildtool_depend>ament_python</buildtool_depend>
-  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>kaiev26_msgs</exec_depend>
+  <exec_depend>lane_seg_control</exec_depend>
+  <exec_depend>my_rule_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
-  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>xycar_msgs</exec_depend>
   <test_depend>python3-pytest</test_depend>
   <export><build_type>ament_python</build_type></export>
 </package>

@@ -4,43 +4,682 @@ import unittest
 import cv2
 import numpy as np
 
-try:
-    from xycar_rule_drive.canonical_stanley_pursuit_driver import (
-        adaptive_smooth_steering_command,
-        anticipatory_center_corridor_error,
-        apply_turn_transition_recovery,
-        blend_pursuit_stanley,
-        canonical_class_masks,
-        command_during_lane_loss,
-        connect_yellow_centerline,
-        compute_departure_guard_pure_pursuit_weight,
-        fuse_lane_center_paths,
-        fused_stanley_pursuit,
-        latency_compensated_lookahead,
-        lead_compensated_steering_command,
-        offset_path_left,
-        offset_path_right,
-        outer_white_is_consistent,
-        path_heading_change_per_m,
-        predict_path_in_delayed_vehicle_frame,
-        pursuit_requests_command_reversal,
-        smooth_target_path,
-        steering_term_requests_command_reversal,
-        update_heading_recovery_latch,
-        white_boundary_to_target_offset,
-    )
-except ModuleNotFoundError as error:
-    EXTERNAL_MESSAGE_DEPENDENCY = str(error)
-else:
-    EXTERNAL_MESSAGE_DEPENDENCY = ""
-
-
-@unittest.skipIf(
-    EXTERNAL_MESSAGE_DEPENDENCY,
-    "requires the external kaiev26_msgs ROS message package: "
-    + EXTERNAL_MESSAGE_DEPENDENCY,
+from xycar_rule_drive.canonical_stanley_pursuit_driver import (
+    active_avoidance_straight_pursuit_weight,
+    adaptive_smooth_steering_command,
+    amplify_curve_steering_command,
+    anticipatory_center_corridor_error,
+    apply_turn_transition_recovery,
+    avoidance_return_state_is_active,
+    blend_pursuit_stanley,
+    canonical_class_masks,
+    command_during_lane_loss,
+    far_path_signed_curvature_per_m,
+    connect_yellow_centerline,
+    compute_departure_guard_pure_pursuit_weight,
+    curve_multiplier_source_allowed,
+    curvature_speed_limit,
+    effective_target_offsets,
+    fuse_lane_center_paths,
+    fused_stanley_pursuit,
+    guard_unconfirmed_yellow_reversal,
+    latency_compensated_lookahead,
+    lead_compensated_steering_command,
+    offset_lane_target,
+    offset_path_left,
+    offset_path_right,
+    outer_white_is_consistent,
+    path_heading_change_per_m,
+    predict_path_in_delayed_vehicle_frame,
+    pursuit_requests_command_reversal,
+    return_center_straight_pursuit_weight,
+    select_control_latency_preview_sec,
+    select_path_when_yellow_missing,
+    smooth_target_path,
+    suppress_opposed_right_avoidance_entry_steering,
+    steering_term_requests_command_reversal,
+    steering_smoothing_profile,
+    update_heading_recovery_latch,
+    update_curve_reversal_confirmation,
+    update_curve_preview_latch,
+    update_curve_latency_preview_hold,
+    update_curve_speed_latch,
+    update_degraded_path_latch,
+    usable_forward_path,
+    white_boundary_to_target_offset,
+    yellow_curve_reversal_request_sign,
 )
+
+
 class CanonicalStanleyPursuitTest(unittest.TestCase):
+    def test_right_avoidance_entry_blocks_only_opposed_left_command(self):
+        command, active = suppress_opposed_right_avoidance_entry_steering(
+            -30.0,
+            avoidance_active=True,
+            avoidance_started_time=10.0,
+            now=10.2,
+            guard_sec=0.35,
+            lateral_offset_m=-0.08,
+        )
+        self.assertTrue(active)
+        self.assertEqual(command, 0.0)
+
+        command, active = suppress_opposed_right_avoidance_entry_steering(
+            18.0,
+            avoidance_active=True,
+            avoidance_started_time=10.0,
+            now=10.2,
+            guard_sec=0.35,
+            lateral_offset_m=-0.08,
+        )
+        self.assertTrue(active)
+        self.assertEqual(command, 18.0)
+
+    def test_right_avoidance_entry_guard_expires(self):
+        command, active = suppress_opposed_right_avoidance_entry_steering(
+            -30.0,
+            avoidance_active=True,
+            avoidance_started_time=10.0,
+            now=10.5,
+            guard_sec=0.35,
+            lateral_offset_m=-0.13,
+        )
+        self.assertFalse(active)
+        self.assertEqual(command, -30.0)
+
+    def test_active_avoidance_raises_straight_pursuit_weight_only_while_active(self):
+        self.assertEqual(
+            active_avoidance_straight_pursuit_weight(
+                0.10,
+                avoidance_active=False,
+                avoidance_weight=0.45,
+            ),
+            0.10,
+        )
+        self.assertEqual(
+            active_avoidance_straight_pursuit_weight(
+                0.10,
+                avoidance_active=True,
+                avoidance_weight=0.45,
+            ),
+            0.45,
+        )
+
+    def test_avoidance_return_state_expires_without_updates(self):
+        self.assertTrue(
+            avoidance_return_state_is_active(
+                True,
+                last_update_time=10.0,
+                now=10.2,
+                timeout_sec=0.30,
+            )
+        )
+        self.assertFalse(
+            avoidance_return_state_is_active(
+                True,
+                last_update_time=10.0,
+                now=10.4,
+                timeout_sec=0.30,
+            )
+        )
+
+    def test_return_center_raises_straight_pursuit_weight_only_while_active(self):
+        self.assertEqual(
+            return_center_straight_pursuit_weight(
+                0.10,
+                return_center_active=False,
+                return_weight=0.45,
+            ),
+            0.10,
+        )
+        self.assertEqual(
+            return_center_straight_pursuit_weight(
+                0.10,
+                return_center_active=True,
+                return_weight=0.45,
+            ),
+            0.45,
+        )
+
+    def test_control_latency_preview_uses_confirmed_curve_state(self):
+        self.assertEqual(
+            select_control_latency_preview_sec(
+                curve_active=False,
+                straight_sec=0.20,
+                curve_sec=0.35,
+            ),
+            0.20,
+        )
+        self.assertEqual(
+            select_control_latency_preview_sec(
+                curve_active=True,
+                straight_sec=0.20,
+                curve_sec=0.35,
+            ),
+            0.35,
+        )
+
+    def test_curve_latency_preview_holds_for_half_second_after_entry(self):
+        active, hold_until = update_curve_latency_preview_hold(
+            curve_latched=True,
+            preview_active=False,
+            hold_until=0.0,
+            now=10.0,
+            minimum_hold_sec=0.50,
+        )
+        self.assertTrue(active)
+        self.assertEqual(hold_until, 10.5)
+
+        active, hold_until = update_curve_latency_preview_hold(
+            curve_latched=False,
+            preview_active=active,
+            hold_until=hold_until,
+            now=10.3,
+            minimum_hold_sec=0.50,
+        )
+        self.assertTrue(active)
+
+        active, hold_until = update_curve_latency_preview_hold(
+            curve_latched=False,
+            preview_active=active,
+            hold_until=hold_until,
+            now=10.5,
+            minimum_hold_sec=0.50,
+        )
+        self.assertFalse(active)
+        self.assertEqual(hold_until, 0.0)
+
+    def test_curvature_speed_limit_uses_the_lowest_path_cap(self):
+        common = {
+            "straight_speed_command": 22.0,
+            "curve_speed_command": 14.0,
+            "degraded_path_speed_command": 12.0,
+        }
+        self.assertEqual(
+            curvature_speed_limit(
+                **common,
+                curve_active=False,
+                degraded_path_active=False,
+            ),
+            22.0,
+        )
+        self.assertEqual(
+            curvature_speed_limit(
+                **common,
+                curve_active=True,
+                degraded_path_active=False,
+            ),
+            14.0,
+        )
+        self.assertEqual(
+            curvature_speed_limit(
+                **common,
+                curve_active=True,
+                degraded_path_active=True,
+            ),
+            12.0,
+        )
+
+    def test_curve_speed_mode_requires_two_frames_and_hysteresis(self):
+        state = update_curve_speed_latch(
+            False,
+            0,
+            0,
+            curve_detection_per_m=0.20,
+            enter_threshold_per_m=0.16,
+            exit_threshold_per_m=0.12,
+            confirmation_frames=2,
+            release_frames=3,
+        )
+        self.assertEqual(state, (False, 1, 0))
+        state = update_curve_speed_latch(
+            *state,
+            curve_detection_per_m=0.20,
+            enter_threshold_per_m=0.16,
+            exit_threshold_per_m=0.12,
+            confirmation_frames=2,
+            release_frames=3,
+        )
+        self.assertEqual(state, (True, 2, 0))
+        state = update_curve_speed_latch(
+            *state,
+            curve_detection_per_m=0.14,
+            enter_threshold_per_m=0.16,
+            exit_threshold_per_m=0.12,
+            confirmation_frames=2,
+            release_frames=3,
+        )
+        self.assertEqual(state, (True, 3, 0))
+
+    def test_curve_speed_mode_releases_after_three_straight_frames(self):
+        state = (True, 2, 0)
+        for expected_misses in (1, 2):
+            state = update_curve_speed_latch(
+                *state,
+                curve_detection_per_m=0.10,
+                enter_threshold_per_m=0.16,
+                exit_threshold_per_m=0.12,
+                confirmation_frames=2,
+                release_frames=3,
+            )
+            self.assertEqual(state, (True, 0, expected_misses))
+        state = update_curve_speed_latch(
+            *state,
+            curve_detection_per_m=0.10,
+            enter_threshold_per_m=0.16,
+            exit_threshold_per_m=0.12,
+            confirmation_frames=2,
+            release_frames=3,
+        )
+        self.assertEqual(state, (False, 0, 3))
+
+    def test_degraded_path_requires_two_new_short_frames(self):
+        state = update_degraded_path_latch(
+            False,
+            0,
+            0,
+            path_valid=True,
+            path_span_m=0.39,
+            enter_span_m=0.40,
+            release_span_m=0.60,
+            confirmation_frames=2,
+            release_frames=2,
+        )
+        self.assertEqual(state, (False, 1, 0))
+        state = update_degraded_path_latch(
+            *state,
+            path_valid=True,
+            path_span_m=0.38,
+            enter_span_m=0.40,
+            release_span_m=0.60,
+            confirmation_frames=2,
+            release_frames=2,
+        )
+        self.assertEqual(state, (True, 2, 0))
+
+    def test_degraded_path_holds_in_hysteresis_band_and_releases_twice(self):
+        state = update_degraded_path_latch(
+            True,
+            0,
+            0,
+            path_valid=True,
+            path_span_m=0.50,
+            enter_span_m=0.40,
+            release_span_m=0.60,
+            confirmation_frames=2,
+            release_frames=2,
+        )
+        self.assertEqual(state, (True, 0, 0))
+        state = update_degraded_path_latch(
+            *state,
+            path_valid=True,
+            path_span_m=0.62,
+            enter_span_m=0.40,
+            release_span_m=0.60,
+            confirmation_frames=2,
+            release_frames=2,
+        )
+        self.assertEqual(state, (True, 0, 1))
+        state = update_degraded_path_latch(
+            *state,
+            path_valid=True,
+            path_span_m=0.65,
+            enter_span_m=0.40,
+            release_span_m=0.60,
+            confirmation_frames=2,
+            release_frames=2,
+        )
+        self.assertEqual(state, (False, 0, 2))
+
+    def test_invalid_path_enters_degraded_immediately(self):
+        self.assertEqual(
+            update_degraded_path_latch(
+                False,
+                0,
+                0,
+                path_valid=False,
+                path_span_m=float("nan"),
+                enter_span_m=0.40,
+                release_span_m=0.60,
+                confirmation_frames=2,
+                release_frames=2,
+            ),
+            (True, 0, 0),
+        )
+
+    def test_curve_preview_requires_two_consecutive_frames(self):
+        state = update_curve_preview_latch(
+            False,
+            0,
+            0,
+            curve_evidence=True,
+            confirmation_frames=2,
+            release_frames=2,
+        )
+        self.assertEqual(state, (False, 1, 0))
+        state = update_curve_preview_latch(
+            *state,
+            curve_evidence=True,
+            confirmation_frames=2,
+            release_frames=2,
+        )
+        self.assertEqual(state, (True, 2, 0))
+
+    def test_curve_preview_releases_after_two_misses(self):
+        state = (True, 2, 0)
+        state = update_curve_preview_latch(
+            *state,
+            curve_evidence=False,
+            confirmation_frames=2,
+            release_frames=2,
+        )
+        self.assertEqual(state, (True, 0, 1))
+        state = update_curve_preview_latch(
+            *state,
+            curve_evidence=False,
+            confirmation_frames=2,
+            release_frames=2,
+        )
+        self.assertEqual(state, (False, 0, 2))
+
+    def test_unconfirmed_yellow_reversal_can_only_unwind_to_zero(self):
+        guarded = guard_unconfirmed_yellow_reversal(
+            -24.0,
+            last_angle_command=18.0,
+            minimum_current_command=10.0,
+            yellow_reference=True,
+            confirmed=False,
+            confirmed_sign=0.0,
+            far_reference_command_sign=-1.0,
+        )
+        self.assertEqual(guarded, 0.0)
+
+    def test_confirmed_far_yellow_reversal_is_allowed(self):
+        guarded = guard_unconfirmed_yellow_reversal(
+            -24.0,
+            last_angle_command=18.0,
+            minimum_current_command=10.0,
+            yellow_reference=True,
+            confirmed=True,
+            confirmed_sign=-1.0,
+            far_reference_command_sign=-1.0,
+        )
+        self.assertEqual(guarded, -24.0)
+
+    def test_white_command_is_not_changed_by_yellow_reversal_guard(self):
+        guarded = guard_unconfirmed_yellow_reversal(
+            -24.0,
+            last_angle_command=18.0,
+            minimum_current_command=10.0,
+            yellow_reference=False,
+            confirmed=False,
+            confirmed_sign=0.0,
+            far_reference_command_sign=float("nan"),
+        )
+        self.assertEqual(guarded, -24.0)
+
+    def test_same_direction_far_yellow_holds_inward_steering(self):
+        guarded = guard_unconfirmed_yellow_reversal(
+            -24.0,
+            last_angle_command=18.0,
+            minimum_current_command=10.0,
+            yellow_reference=True,
+            confirmed=False,
+            confirmed_sign=0.0,
+            far_reference_command_sign=1.0,
+        )
+        self.assertEqual(guarded, 18.0)
+
+    def test_far_path_curvature_keeps_turn_direction(self):
+        x = np.linspace(0.0, 0.70, 32)
+        left_curve = np.column_stack((x, 0.8 * x * x))
+        right_curve = np.column_stack((x, -0.8 * x * x))
+
+        self.assertGreater(
+            far_path_signed_curvature_per_m(
+                left_curve, near_x_m=0.45, far_x_m=0.60
+            ),
+            0.0,
+        )
+        self.assertLess(
+            far_path_signed_curvature_per_m(
+                right_curve, near_x_m=0.45, far_x_m=0.60
+            ),
+            0.0,
+        )
+
+    def test_curve_reversal_requires_pursuit_and_far_yellow_agreement(self):
+        common = {
+            "last_angle_command": 18.0,
+            "minimum_current_command": 10.0,
+            "pure_pursuit_activation_rad": 0.12,
+            "far_curvature_activation_per_m": 0.12,
+            "yellow_reference": True,
+        }
+        self.assertEqual(
+            yellow_curve_reversal_request_sign(
+                pure_pursuit_rad=0.30,
+                far_signed_curvature_per_m=0.40,
+                **common,
+            ),
+            -1.0,
+        )
+        self.assertEqual(
+            yellow_curve_reversal_request_sign(
+                pure_pursuit_rad=0.30,
+                far_signed_curvature_per_m=-0.40,
+                **common,
+            ),
+            0.0,
+        )
+
+    def test_white_reference_cannot_trigger_curve_reversal(self):
+        request = yellow_curve_reversal_request_sign(
+            last_angle_command=18.0,
+            pure_pursuit_rad=0.30,
+            far_signed_curvature_per_m=0.40,
+            minimum_current_command=10.0,
+            pure_pursuit_activation_rad=0.12,
+            far_curvature_activation_per_m=0.12,
+            yellow_reference=False,
+        )
+        self.assertEqual(request, 0.0)
+
+    def test_curve_reversal_requires_two_matching_frames(self):
+        sign, count, active = update_curve_reversal_confirmation(
+            0.0, 0, request_sign=-1.0, confirmation_frames=2
+        )
+        self.assertEqual((sign, count, active), (-1.0, 1, False))
+        sign, count, active = update_curve_reversal_confirmation(
+            sign, count, request_sign=-1.0, confirmation_frames=2
+        )
+        self.assertEqual((sign, count, active), (-1.0, 2, True))
+        self.assertEqual(
+            update_curve_reversal_confirmation(
+                sign, count, request_sign=0.0, confirmation_frames=2
+            ),
+            (0.0, 0, False),
+        )
+
+    def test_yellow_loss_prefers_remembered_yellow_over_white(self):
+        remembered = np.asarray([[0.1, 0.2], [0.3, 0.2], [0.5, 0.2]])
+        white = np.asarray([[0.1, -0.2], [0.3, -0.2], [0.5, -0.2]])
+
+        selected, source = select_path_when_yellow_missing(
+            remembered_yellow_target=remembered,
+            white_target=white,
+            yellow_seen=True,
+            prefer_remembered_yellow=True,
+        )
+
+        self.assertIs(selected, remembered)
+        self.assertEqual(source, "yellow_memory")
+
+    def test_exhausted_yellow_memory_holds_instead_of_using_white(self):
+        white = np.asarray([[0.1, -0.2], [0.3, -0.2], [0.5, -0.2]])
+
+        selected, source = select_path_when_yellow_missing(
+            remembered_yellow_target=None,
+            white_target=white,
+            yellow_seen=True,
+            prefer_remembered_yellow=True,
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(source, "none")
+
+    def test_white_can_initialize_path_before_yellow_is_seen(self):
+        white = np.asarray([[0.1, -0.2], [0.3, -0.2], [0.5, -0.2]])
+
+        selected, source = select_path_when_yellow_missing(
+            remembered_yellow_target=None,
+            white_target=white,
+            yellow_seen=False,
+            prefer_remembered_yellow=True,
+        )
+
+        self.assertIs(selected, white)
+        self.assertEqual(source, "white")
+
+    def test_remembered_yellow_expires_after_points_pass_vehicle(self):
+        path = np.asarray(
+            [[-0.2, 0.1], [0.01, 0.1], [0.10, 0.1], [0.20, 0.1]]
+        )
+        self.assertIsNone(usable_forward_path(path))
+
+        path = np.vstack((path, [[0.30, 0.1]]))
+        usable = usable_forward_path(path)
+        self.assertIsNotNone(usable)
+        self.assertEqual(usable.shape, (3, 2))
+        self.assertTrue(np.all(usable[:, 0] >= 0.02))
+
+    def test_tracked_path_does_not_restore_itself_after_exhaustion(self):
+        path = np.asarray([[0.03, 0.0], [0.08, 0.0], [0.13, 0.0]])
+
+        preserved = predict_path_in_delayed_vehicle_frame(
+            path,
+            speed_mps=1.0,
+            curvature_per_m=0.0,
+            latency_sec=0.20,
+        )
+        exhausted = predict_path_in_delayed_vehicle_frame(
+            path,
+            speed_mps=1.0,
+            curvature_per_m=0.0,
+            latency_sec=0.20,
+            preserve_path_if_exhausted=False,
+        )
+
+        self.assertEqual(preserved.shape, (3, 2))
+        self.assertLess(exhausted.shape[0], 3)
+
+    def test_curve_steering_multiplier_ignores_straight_paths(self):
+        self.assertEqual(
+            amplify_curve_steering_command(
+                25.0,
+                curve_active=False,
+                enabled=True,
+                activation_command=20.0,
+                multiplier=1.5,
+                command_min=-42.0,
+                command_max=42.0,
+            ),
+            25.0,
+        )
+
+    def test_curve_steering_multiplier_amplifies_both_directions(self):
+        common = {
+            "curve_active": True,
+            "enabled": True,
+            "activation_command": 20.0,
+            "multiplier": 1.5,
+            "command_min": -42.0,
+            "command_max": 42.0,
+        }
+        self.assertEqual(amplify_curve_steering_command(20.0, **common), 30.0)
+        self.assertEqual(amplify_curve_steering_command(-24.0, **common), -36.0)
+        self.assertEqual(amplify_curve_steering_command(30.0, **common), 42.0)
+
+    def test_curve_steering_multiplier_ignores_small_commands(self):
+        self.assertEqual(
+            amplify_curve_steering_command(
+                -19.9,
+                curve_active=True,
+                enabled=True,
+                activation_command=20.0,
+                multiplier=1.5,
+                command_min=-42.0,
+                command_max=42.0,
+            ),
+            -19.9,
+        )
+
+    def test_curve_multiplier_excludes_remembered_yellow(self):
+        self.assertTrue(
+            curve_multiplier_source_allowed(
+                "yellow", yellow_reference_only=True
+            )
+        )
+        self.assertTrue(
+            curve_multiplier_source_allowed(
+                "fused", yellow_reference_only=True
+            )
+        )
+        self.assertFalse(
+            curve_multiplier_source_allowed(
+                "yellow_memory", yellow_reference_only=True
+            )
+        )
+        self.assertFalse(
+            curve_multiplier_source_allowed(
+                "white", yellow_reference_only=True
+            )
+        )
+
+    def test_smoothing_profile_reports_straight_and_reversal_values(self):
+        common = {
+            "straight_current_weight": 0.40,
+            "curve_current_weight": 0.70,
+            "straight_rate_limit": 180.0,
+            "curve_rate_limit": 300.0,
+            "curve_activation_command": 12.0,
+            "curve_full_command": 24.0,
+        }
+        straight = steering_smoothing_profile(
+            last_command=0.0,
+            raw_command=6.0,
+            **common,
+        )
+        self.assertEqual(straight.curve_fraction, 0.0)
+        self.assertEqual(straight.current_weight, 0.40)
+        self.assertEqual(straight.rate_limit_cmd_per_sec, 180.0)
+
+        reversal = steering_smoothing_profile(
+            last_command=20.0,
+            raw_command=-20.0,
+            **common,
+        )
+        self.assertEqual(reversal.curve_fraction, 1.0)
+        self.assertEqual(reversal.current_weight, 0.70)
+        self.assertEqual(reversal.rate_limit_cmd_per_sec, 300.0)
+
+    def test_external_lateral_offset_combines_with_static_target(self):
+        right, left = effective_target_offsets(
+            target_right_offset_m=0.10,
+            target_left_offset_m=0.0,
+            external_lateral_offset_m=0.28,
+        )
+        self.assertAlmostEqual(right, 0.0)
+        self.assertAlmostEqual(left, 0.18)
+
+        right, left = effective_target_offsets(
+            target_right_offset_m=0.0,
+            target_left_offset_m=0.0,
+            external_lateral_offset_m=-0.28,
+        )
+        self.assertAlmostEqual(right, 0.28)
+        self.assertAlmostEqual(left, 0.0)
+
     def test_latency_preview_adds_distance_travelled_before_actuation(self):
         self.assertAlmostEqual(
             latency_compensated_lookahead(1.0, 1.36, 0.25),
@@ -436,6 +1075,30 @@ class CanonicalStanleyPursuitTest(unittest.TestCase):
         )
         self.assertAlmostEqual(adaptive.fused_rad, baseline.fused_rad)
 
+    def test_segmented_curvature_finds_a_bend_between_straight_ends(self):
+        forward = np.linspace(0.05, 0.80, 151)
+        lateral = np.zeros_like(forward)
+        bend = (forward >= 0.25) & (forward <= 0.45)
+        phase = (forward[bend] - 0.25) / 0.20
+        lateral[bend] = 0.05 * (1.0 - np.cos(2.0 * math.pi * phase))
+        path = np.column_stack((forward, lateral))
+
+        whole_span = path_heading_change_per_m(
+            path,
+            near_x_m=0.15,
+            far_x_m=0.60,
+            segment_count=1,
+        )
+        segmented = path_heading_change_per_m(
+            path,
+            near_x_m=0.15,
+            far_x_m=0.60,
+            segment_count=3,
+        )
+
+        self.assertLess(whole_span, 0.16)
+        self.assertGreater(segmented, 0.16)
+
     def test_straight_center_corridor_reverses_before_crossing(self):
         forward = np.linspace(0.05, 1.5, 32)
         path = np.column_stack((forward, 0.08 - 0.15 * forward))
@@ -664,6 +1327,20 @@ class CanonicalStanleyPursuitTest(unittest.TestCase):
         np.testing.assert_allclose(target[:, 1], yellow[:, 1] - 0.20)
         self.assertTrue(np.all(np.diff(target[:, 0]) > 0.0))
 
+    def test_explicit_left_target_moves_yellow_left_ten_cm(self):
+        yellow = np.asarray(
+            [[0.05, 0.0], [0.50, 0.0], [1.00, 0.0]],
+            dtype=np.float64,
+        )
+
+        target = offset_lane_target(
+            yellow,
+            target_right_offset_m=0.0,
+            target_left_offset_m=0.10,
+        )
+
+        np.testing.assert_allclose(target[:, 1], 0.10)
+
     def test_left_offset_moves_outer_white_to_lane_center(self):
         outer_white = np.asarray(
             [[0.05, -0.26], [0.50, -0.26], [1.00, -0.26]],
@@ -690,6 +1367,10 @@ class CanonicalStanleyPursuitTest(unittest.TestCase):
         self.assertAlmostEqual(
             white_boundary_to_target_offset(0.20, 0.20),
             0.20,
+        )
+        self.assertAlmostEqual(
+            white_boundary_to_target_offset(0.20, 0.0, 0.10),
+            0.50,
         )
 
     def test_outer_white_is_accepted_at_measured_lane_width(self):

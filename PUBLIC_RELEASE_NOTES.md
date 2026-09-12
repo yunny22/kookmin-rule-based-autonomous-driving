@@ -1,86 +1,97 @@
 # Public Release Notes
 
-## Source selection
-
-- **Audited source branch:** `codex/slam-gazebo-controller`
-- **Audited commit:** `678522e99f6527fa151796686b3c3574df55e18f`
-- **Original remote:** `git@github.com:steveandy-sudo/kookmin_autonomous_competition_teamKAI.git`
-- **Selection basis:** `xycar_final_drive/launch/final_real_stack.launch.py` exposes a `driver_mode=rule` branch that launches LR-ASPP canonical perception and the canonical Stanley–Pure Pursuit driver.
-
-The original final launcher is **SUPPORTING** evidence, not copied source: it also selects RL and Hybrid launch paths that are outside this Rule-only release.
-
-## Classification
-
-| Classification | Source | Public-release decision |
-| --- | --- | --- |
-| FINAL | `lane_seg_control` LR-ASPP, mask-to-canonical path | Included after model/calibration sanitization |
-| FINAL | `xycar_rule_drive` canonical Stanley–Pure Pursuit driver | Included after launch/config sanitization |
-| SUPPORTING | `xycar_final_drive/final_real_stack.launch.py` Rule branch | Documented, not copied because mixed with RL/Hybrid |
-| EXPERIMENT / PRELIMINARY | `track_drive_sve` | Excluded; package documentation identifies a Gazebo preliminary path |
-| EXPERIMENT / SLAM-COUPLED | `study/my_rule`, `xycar_map_nav` | Excluded; SLAM dependencies and working-tree changes make them unsuitable for this scoped release |
-| OBSOLETE / NONESSENTIAL | legacy camera, keyboard, bag, RViz launch variants | Excluded |
-| UNKNOWN | competition-day traffic, obstacle, and cone mission stack | Omitted pending a verified final deployment command |
-
-## Included
-
-- LR-ASPP input preprocessing, semantic-mask generation, BEV/canonical rendering, and white-lane fitting utilities.
-- Canonical centerline path processing and adaptive Stanley–Pure Pursuit fusion.
-- A new `final_rule_only.launch.py` that composes only the audited Rule path.
-- Unit-test sources and package manifests required to build the retained packages.
-
 ## Provenance
 
-| Scope | Classification | Basis |
-| --- | --- | --- |
-| LR-ASPP/canonical and fused-control source portions | PERSONAL | Selected-commit history attributes relevant code portions to one local author identity |
-| Rule-path assembly | CO-DEVELOPED | The final launcher belongs to a broader team workspace and selects shared packages |
-| Vehicle deployment and competition operation | TEAM | The retained source does not establish individual ownership of the complete vehicle system |
-| ROS 2, OpenCV, NumPy, PyTorch, and external message interfaces | THIRD-PARTY / EXTERNAL | Runtime dependencies are referenced but their source is not copied |
-| Competition-day traffic, obstacle, stop-line, and cone modules | UNKNOWN | A self-contained final deployment reference was not found |
+- **Original repository:** https://github.com/steveandy-sudo/kookmin_autonomous_competition_teamKAI
+- **Audited branch:** main
+- **Audited source commit:** 0ae216c6255e25404560948f3e6d5479a7a7ba8f
+- **Audit date:** 2026-09-12
+- **Selection basis:** traced the final execution path from
+  run_complete_space_hybrid.sh through run_space_hybrid_test.sh,
+  real_sequential_hybrid_drive.launch.py, the Xbin perception node, fused RULE
+  controller, sequential_hybrid_driver, space_drive_gate, and the external
+  VESC subscriber.
 
-## Intentionally excluded
+## Architecture confirmed from source
 
-- All model weights (`.pt`, `.pth`, `.onnx`, `.engine`), including LR-ASPP and object models.
-- Sim-to-Real, RL, Hybrid, SLAM, parking, and KAI source sets.
-- ROS bags, datasets, camera recordings, images, video, experiment outputs, and large archives.
-- Hardware-specific camera calibration, measured steering maps, speed tables, and competition vehicle configuration.
-- YOLO/vendor source and nonessential RViz or debugging artifacts.
+- Normal lane driving used direct Xbin yellow-centerline perception.
+- The direct centerline was projected to vehicle-frame metric points and
+  published on /perception/xbin_direct_centerline.
+- The final RULE candidate used fused Pure Pursuit and Stanley control.
+- LR-ASPP was wired to the shortcut/W1 subsystem, not the normal
+  lane-driving path.
+- The selector priority was TRAFFIC > SHORTCUT > CONE > YOLO + LiDAR
+  AVOIDANCE > RULE.
+- The competition script started the selector in shadow mode; space_drive_gate
+  was the final /xycar_motor publisher, followed by the external VESC driver.
 
-## Sanitization
+## Included source
 
-- The public launch requires `model_path` rather than embedding a model file.
-- Camera calibration defaults are empty and rectification is disabled unless a local file is supplied.
-- The public launch defaults to shadow operation with `drive_enabled=false`.
-- The measured steering-map defaults are neutral placeholders; local calibration belongs in an ignored `vehicle.local.yaml`.
-- No source-machine paths, known model binaries, or source-machine calibration files are included.
+| Area | Public files |
+| --- | --- |
+| Xbin lane path | lane_seg_control Xbin model/interface, direct-centerline projection, camera and canonical helpers, one unit test |
+| RULE controller | xycar_rule_drive fused Pure Pursuit–Stanley controller and supporting path helpers |
+| Traffic / avoidance | xycar_map_nav traffic state, YOLO/LiDAR avoidance state, LiDAR processing and mission/lap helpers |
+| Arbitration / output | sequential_hybrid_driver.py, space_drive_gate.py, and their pure cores |
+| Safe launch | xbin_rule_shadow.launch.py, which leaves motor output disabled |
+
+## Deliberately excluded
+
+- Xbin, YOLO and LR-ASPP weights; datasets; logs; rosbag files; videos; images;
+  and generated build products.
+- Camera calibration, camera–LiDAR extrinsics, measured steering maps, speed
+  tables, hardware ports, network settings, and real competition coordinates.
+- The VESC hardware driver and vehicle interface.
+- The shortcut/W1 and cone perception/driving implementations, which are
+  teammate subsystems. Their candidate interfaces are documented only.
+- Third-party and external TeamKAI packages required by the original runtime.
+
+## Contribution boundary
+
+**Taeyun Kim:** Xbin lane path, direct metric path, Pure Pursuit–Stanley
+vehicle controller implementation/tuning, traffic logic, YOLO/LiDAR vehicle
+avoidance, mission/lap priority arbitration, and final vehicle-command
+integration and tuning.
+
+**Other team members:** shortcut/W1 perception/driving and cone
+perception/driving. Their commands/events were integrated into the final stack,
+but their underlying algorithms are not claimed as Taeyun Kim's work.
+
+## Team result
+
+The TeamKAI README at the audited commit records a three-lap integrated
+completion on 2026-08-23. This is retained only as a **team result**. No
+independent result artifact is distributed in this release.
+
+## Sanitization and release policy
+
+- No model, dataset, vehicle log, calibration, route, credential, private IP,
+  or source-machine path is included.
+- The root repository intentionally has no open-source LICENSE file. This
+  portfolio/research demonstration release does not re-license dependencies.
+- Package metadata is marked UNLICENSED for this curated release.
+- ROS 2, OpenCV, NumPy, PyTorch, Ultralytics, and external message/hardware
+  interfaces remain third-party or external dependencies.
 
 ## Validation
 
-- `python3 -m compileall -q xycar_ws/src/lane_seg_control xycar_ws/src/xycar_rule_drive` completed successfully.
-- Both package manifests parsed as XML.
-- `colcon build --packages-select lane_seg_control xycar_rule_drive` completed successfully in a ROS 2 Humble environment.
-- The retained perception tests passed: 2 tests.
-- The retained controller tests passed: 42 tests after making pure controller functions importable without the external `kaiev26_msgs` runtime package.
-- `ros2 launch ... --show-args` resolved both the perception and public Rule-only launch descriptions.
-- An artifact/path scan found no model weight, recording, dataset, or source-machine path in the staged source tree.
+- Python syntax compilation of all published Python sources: **passed**.
+- Selected pure unit tests for direct Xbin projection, traffic logic,
+  output-gate core, and lap policy: **43 passed**.
+- `test_yolo_lidar_avoidance.py` was not run in this environment because its
+  ROS node import requires the external `rclpy` runtime and message packages.
+- XML parsing for all package manifests: **passed**.
+- YAML validation is **not applicable**: real vehicle configuration is
+  deliberately excluded.
+- `colcon build --packages-select lane_seg_control xycar_rule_drive
+  xycar_map_nav`: **passed** (3 packages).
+- `ros2 launch xycar_map_nav xbin_rule_shadow.launch.py --show-args`:
+  **passed**. A full vehicle launch was not run because local authorised model,
+  calibration, message interfaces, and hardware are intentionally excluded.
 
-## Remaining Issues
+## Scope limitation
 
-- Package metadata is `UNLICENSED`; this portfolio repository grants no separate
-  open-source reuse license. Third-party dependency terms remain in force.
-- Confirm whether the LR-ASPP model weight may be redistributed; it is currently excluded.
-- Obtain the exact competition-day launch/deployment record before adding mission, traffic, obstacle, stop-line, or cone modules.
-- Repeat full vehicle validation only with a locally measured camera, steering, speed, and vehicle-interface configuration.
-
-## Attribution boundary
-
-Git blame at the selected commit associates portions of the retained
-perception/canonical and controller fusion code with one local author identity.
-That evidence supports source-level **PERSONAL** contribution only. The final
-competition system and its result are **TEAM** work; perception-control
-integration is presented as **CO-DEVELOPED**. No unaudited mission module is
-claimed as an individual contribution.
-
-## Release status
-
-This directory is local staging only. It has no remote, has not been pushed, and has not been published. A maintainer must complete the remaining checks before making any repository public.
+This repository is an auditable portfolio subset. It documents the final
+competition architecture without exposing vehicle-ready calibration or
+teammate implementation source. It must not be used to command a vehicle
+without locally authorised models, calibration, interfaces, and safety review.

@@ -7,6 +7,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import yaml
+from sensor_msgs.msg import Image
+from std_msgs.msg import Header
 
 
 def decode_compressed_bgr(
@@ -16,6 +18,102 @@ def decode_compressed_bgr(
     if encoded.size == 0:
         return None
     return cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+
+
+def raw_image_to_bgr(message: Image) -> np.ndarray:
+    """Convert a ROS raw image to contiguous BGR without cv_bridge."""
+    encoding = str(message.encoding).lower()
+    channels_by_encoding = {
+        "mono8": 1,
+        "bgr8": 3,
+        "rgb8": 3,
+        "bgra8": 4,
+        "rgba8": 4,
+    }
+    channels = channels_by_encoding.get(encoding)
+    if channels is None:
+        raise ValueError(
+            f"unsupported raw camera encoding: {message.encoding}"
+        )
+    width = int(message.width)
+    height = int(message.height)
+    step = int(message.step)
+    if width <= 0 or height <= 0 or step < width * channels:
+        raise ValueError(
+            f"invalid raw image layout: {width}x{height}, step={step}"
+        )
+    data = np.frombuffer(message.data, dtype=np.uint8)
+    required = height * step
+    if data.size < required:
+        raise ValueError(
+            f"raw image payload is short: {data.size} < {required}"
+        )
+    rows = data[:required].reshape(height, step)
+    pixels = rows[:, : width * channels]
+    if channels == 1:
+        frame = pixels.reshape(height, width)
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    frame = pixels.reshape(height, width, channels)
+    if encoding == "rgb8":
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    elif encoding == "bgra8":
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+    elif encoding == "rgba8":
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+    return np.ascontiguousarray(frame)
+
+
+def raw_image_to_mono(message: Image) -> np.ndarray:
+    """Convert a ROS raw image to contiguous mono8 without cv_bridge."""
+    encoding = str(message.encoding).lower()
+    if encoding == "mono8":
+        width = int(message.width)
+        height = int(message.height)
+        step = int(message.step)
+        data = np.frombuffer(message.data, dtype=np.uint8)
+        required = height * step
+        if width <= 0 or height <= 0 or step < width or data.size < required:
+            raise ValueError(
+                f"invalid mono8 image layout: {width}x{height}, "
+                f"step={step}, bytes={data.size}"
+            )
+        return np.ascontiguousarray(
+            data[:required].reshape(height, step)[:, :width]
+        )
+    return cv2.cvtColor(raw_image_to_bgr(message), cv2.COLOR_BGR2GRAY)
+
+
+def cv_image_to_message(
+    frame: np.ndarray,
+    encoding: str,
+    header: Header,
+) -> Image:
+    """Convert a uint8 OpenCV image to ROS Image without cv_bridge."""
+    normalized = str(encoding).lower()
+    image = np.ascontiguousarray(frame)
+    if image.dtype != np.uint8:
+        raise ValueError(f"unsupported image dtype: {image.dtype}")
+    if normalized == "mono8" and image.ndim == 2:
+        channels = 1
+    elif (
+        normalized in {"bgr8", "rgb8"}
+        and image.ndim == 3
+        and image.shape[2] == 3
+    ):
+        channels = 3
+    else:
+        raise ValueError(
+            f"image shape {image.shape} does not match encoding {encoding}"
+        )
+    message = Image()
+    message.header = header
+    message.height = int(image.shape[0])
+    message.width = int(image.shape[1])
+    message.encoding = normalized
+    message.is_bigendian = False
+    message.step = message.width * channels
+    message.data = image.tobytes()
+    return message
 
 
 def scale_camera_matrix(
@@ -80,8 +178,21 @@ class CameraRectifier:
         self.map1: np.ndarray | None = None
         self.map2: np.ndarray | None = None
         self.map_size: tuple[int, int] | None = None
+        self.scaled_maps: dict[
+            tuple[int, int, int, int],
+            tuple[np.ndarray, np.ndarray],
+        ] = {}
 
-    def build_maps(self, width: int, height: int) -> None:
+    def rectification_parameters(
+        self,
+        width: int,
+        height: int,
+    ) -> tuple[
+        tuple[int, int],
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ]:
         size = (int(width), int(height))
         camera_matrix = scale_camera_matrix(
             self.matrix,
@@ -96,7 +207,7 @@ class CameraRectifier:
             distortion = np.zeros((4, 1), dtype=np.float64)
             count = min(4, self.distortion.size)
             distortion[:count, 0] = self.distortion[:count]
-            self.rectified_matrix = (
+            rectified_matrix = (
                 cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
                     camera_matrix,
                     distortion,
@@ -106,31 +217,88 @@ class CameraRectifier:
                     new_size=size,
                 )
             )
-            self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
+        else:
+            distortion = self.distortion
+            rectified_matrix, _ = cv2.getOptimalNewCameraMatrix(
                 camera_matrix,
                 distortion,
-                rotation,
-                self.rectified_matrix,
-                size,
-                cv2.CV_32FC1,
-            )
-        else:
-            self.rectified_matrix, _ = cv2.getOptimalNewCameraMatrix(
-                camera_matrix,
-                self.distortion,
                 size,
                 alpha=self.balance,
                 newImgSize=size,
             )
-            self.map1, self.map2 = cv2.initUndistortRectifyMap(
+        return size, camera_matrix, distortion, rectified_matrix
+
+    def build_maps(self, width: int, height: int) -> None:
+        size, camera_matrix, distortion, rectified_matrix = (
+            self.rectification_parameters(width, height)
+        )
+        rotation = np.eye(3, dtype=np.float64)
+        if (
+            "fisheye" in self.distortion_model
+            or "equidistant" in self.distortion_model
+        ):
+            self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
                 camera_matrix,
-                self.distortion,
+                distortion,
                 rotation,
-                self.rectified_matrix,
+                rectified_matrix,
                 size,
                 cv2.CV_32FC1,
             )
+        else:
+            self.map1, self.map2 = cv2.initUndistortRectifyMap(
+                camera_matrix,
+                distortion,
+                rotation,
+                rectified_matrix,
+                size,
+                cv2.CV_32FC1,
+            )
+        self.rectified_matrix = rectified_matrix
         self.map_size = size
+
+    def build_scaled_maps(
+        self,
+        source_width: int,
+        source_height: int,
+        output_width: int,
+        output_height: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        source_size, camera_matrix, distortion, rectified_matrix = (
+            self.rectification_parameters(source_width, source_height)
+        )
+        output_size = (int(output_width), int(output_height))
+        if output_size[0] <= 0 or output_size[1] <= 0:
+            raise ValueError(f"invalid rectified output size: {output_size}")
+
+        scaled_rectified_matrix = rectified_matrix.copy()
+        scaled_rectified_matrix[0, :3] *= (
+            output_size[0] / float(source_size[0])
+        )
+        scaled_rectified_matrix[1, :3] *= (
+            output_size[1] / float(source_size[1])
+        )
+        rotation = np.eye(3, dtype=np.float64)
+        if (
+            "fisheye" in self.distortion_model
+            or "equidistant" in self.distortion_model
+        ):
+            return cv2.fisheye.initUndistortRectifyMap(
+                camera_matrix,
+                distortion,
+                rotation,
+                scaled_rectified_matrix,
+                output_size,
+                cv2.CV_32FC1,
+            )
+        return cv2.initUndistortRectifyMap(
+            camera_matrix,
+            distortion,
+            rotation,
+            scaled_rectified_matrix,
+            output_size,
+            cv2.CV_32FC1,
+        )
 
     def rectify(self, image: np.ndarray) -> np.ndarray:
         height, width = image.shape[:2]
@@ -143,6 +311,32 @@ class CameraRectifier:
             image,
             self.map1,
             self.map2,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+
+    def rectify_to_size(
+        self,
+        image: np.ndarray,
+        output_width: int,
+        output_height: int,
+    ) -> np.ndarray:
+        """Rectify directly into a smaller model frame with one remap."""
+        source_height, source_width = image.shape[:2]
+        key = (
+            int(source_width),
+            int(source_height),
+            int(output_width),
+            int(output_height),
+        )
+        maps = self.scaled_maps.get(key)
+        if maps is None:
+            maps = self.build_scaled_maps(*key)
+            self.scaled_maps[key] = maps
+        return cv2.remap(
+            image,
+            maps[0],
+            maps[1],
             interpolation=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
         )

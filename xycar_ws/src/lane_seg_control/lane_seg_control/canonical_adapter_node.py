@@ -9,10 +9,15 @@ import cv2
 import message_filters
 import numpy as np
 import rclpy
-from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
+
+from xycar_perception.canonical_road import (
+    CanonicalRoadStages,
+    _fixed_width_mask,
+    _metric_crop,
+)
 
 from lane_seg_control.white_lane_fitter import (
     WhiteLaneFitResult,
@@ -23,85 +28,11 @@ from lane_seg_control.white_lane_fitter import (
     normalize_yellow_fragments,
     render_white_lane_fit_debug,
 )
-
-
-@dataclass(frozen=True)
-class CanonicalRoadStages:
-    """Intermediate canonical-road outputs retained by this package."""
-
-    road_image: np.ndarray
-    white_mask: np.ndarray
-    yellow_mask: np.ndarray
-    pre_geometry_white_mask: np.ndarray
-    pre_geometry_yellow_mask: np.ndarray
-    post_geometry_white_mask: np.ndarray
-    post_geometry_yellow_mask: np.ndarray
-    valid_mask: np.ndarray
-
-
-def _metric_crop(
-    image: np.ndarray,
-    *,
-    lateral_m_per_px: float,
-    forward_m_per_px: float,
-    lateral_range_m: float,
-    forward_range_m: float,
-) -> np.ndarray:
-    """Crop a centered, metric extent from a BEV image with zero padding."""
-    if lateral_m_per_px <= 0.0 or forward_m_per_px <= 0.0:
-        raise ValueError("BEV metric scales must be positive")
-    if lateral_range_m <= 0.0 or forward_range_m <= 0.0:
-        raise ValueError("canonical metric ranges must be positive")
-
-    source_height, source_width = image.shape[:2]
-    crop_width = max(1, int(round(lateral_range_m / lateral_m_per_px)))
-    crop_height = max(1, int(round(forward_range_m / forward_m_per_px)))
-    center_x = source_width // 2
-    left = center_x - crop_width // 2
-    right = left + crop_width
-    top = source_height - crop_height
-    bottom = source_height
-
-    source_left = max(0, left)
-    source_right = min(source_width, right)
-    source_top = max(0, top)
-    source_bottom = min(source_height, bottom)
-    cropped = image[source_top:source_bottom, source_left:source_right]
-    pad_left = max(0, -left)
-    pad_right = max(0, right - source_width)
-    pad_top = max(0, -top)
-    pad_bottom = max(0, bottom - source_height)
-    if any((pad_left, pad_right, pad_top, pad_bottom)):
-        border_value = 0 if image.ndim == 2 else [0] * image.shape[2]
-        cropped = cv2.copyMakeBorder(
-            cropped,
-            pad_top,
-            pad_bottom,
-            pad_left,
-            pad_right,
-            cv2.BORDER_CONSTANT,
-            value=border_value,
-        )
-    return cropped
-
-
-def _fixed_width_mask(mask: np.ndarray, line_width_px: int) -> np.ndarray:
-    """Skeletonize then redraw a binary mask with a fixed line width."""
-    work = (mask > 0).astype(np.uint8) * 255
-    if not np.any(work):
-        return work
-    skeleton = np.zeros_like(work)
-    cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-    while np.any(work):
-        eroded = cv2.erode(work, cross)
-        opened = cv2.dilate(eroded, cross)
-        skeleton = cv2.bitwise_or(skeleton, cv2.subtract(work, opened))
-        work = eroded
-    width = max(1, int(line_width_px))
-    if width == 1:
-        return skeleton
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (width, width))
-    return cv2.dilate(skeleton, kernel)
+from lane_seg_control.camera_input import (
+    cv_image_to_message,
+    raw_image_to_bgr,
+    raw_image_to_mono,
+)
 
 
 @dataclass(frozen=True)
@@ -528,7 +459,6 @@ class CanonicalAdapterNode(Node):
         self.declare_parameter("sync_slop_sec", 0.08)
         self.declare_parameter("debug_rate_hz", 1.0)
 
-        self.bridge = CvBridge()
         self.input_is_bev = bool(self.get_parameter("input_is_bev").value)
         self.geometry: BevGeometry | None = None
         self.geometry_input_size: tuple[int, int] | None = None
@@ -742,15 +672,9 @@ class CanonicalAdapterNode(Node):
         self, image_message: Image, white_message: Image, yellow_message: Image
     ) -> None:
         try:
-            image = self.bridge.imgmsg_to_cv2(
-                image_message, desired_encoding="bgr8"
-            )
-            white = self.bridge.imgmsg_to_cv2(
-                white_message, desired_encoding="mono8"
-            )
-            yellow = self.bridge.imgmsg_to_cv2(
-                yellow_message, desired_encoding="mono8"
-            )
+            image = raw_image_to_bgr(image_message)
+            white = raw_image_to_mono(white_message)
+            yellow = raw_image_to_mono(yellow_message)
         except Exception as exc:
             self.get_logger().error(f"lane mask conversion failed: {exc}")
             return
@@ -813,8 +737,7 @@ class CanonicalAdapterNode(Node):
                 if publisher.get_subscription_count() > 0:
                     outputs.append((publisher, frame, encoding))
         for publisher, frame, encoding in outputs:
-            output_message = self.bridge.cv2_to_imgmsg(frame, encoding=encoding)
-            output_message.header = header
+            output_message = cv_image_to_message(frame, encoding, header)
             publisher.publish(output_message)
 
         stamp_ns = (
@@ -838,8 +761,7 @@ class CanonicalAdapterNode(Node):
             selected = (bev_white > 0) | (bev_yellow > 0)
             blended = cv2.addWeighted(debug, 0.55, overlay, 0.45, 0.0)
             debug[selected] = blended[selected]
-            debug_message = self.bridge.cv2_to_imgmsg(debug, encoding="bgr8")
-            debug_message.header = header
+            debug_message = cv_image_to_message(debug, "bgr8", header)
             self.debug_pub.publish(debug_message)
             self.last_debug_bucket = debug_bucket
 
@@ -856,10 +778,9 @@ class CanonicalAdapterNode(Node):
                 white_fit,
                 yellow_reference,
             )
-            debug_message = self.bridge.cv2_to_imgmsg(
-                canonical_debug, encoding="bgr8"
+            debug_message = cv_image_to_message(
+                canonical_debug, "bgr8", header
             )
-            debug_message.header = header
             self.canonical_fit_debug_pub.publish(debug_message)
             self.last_canonical_fit_debug_bucket = debug_bucket
 

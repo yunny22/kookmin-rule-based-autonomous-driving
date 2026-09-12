@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ROS 2 TorchScript LR-ASPP lane segmentation without motor outputs."""
+"""ROS 2 TorchScript lane perception without motor outputs."""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from typing import TypeAlias
 import cv2
 import numpy as np
 import rclpy
-from cv_bridge import CvBridge
+from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import Point
+from kaiev26_msgs.msg import Centerline
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -19,13 +21,22 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Float32MultiArray, Header
 
-from lane_seg_control.camera_input import CameraRectifier, decode_compressed_bgr
+from lane_seg_control.camera_input import (
+    CameraRectifier,
+    cv_image_to_message,
+    decode_compressed_bgr,
+    raw_image_to_bgr,
+)
 from lane_seg_control.canonical_adapter_node import (
     BevGeometry,
     CanonicalRenderConfig,
     build_bev_geometry,
     render_canonical_from_bev_masks,
     warp_semantic_masks_only,
+)
+from lane_seg_control.xbin_direct_centerline import (
+    extract_anchor_centers,
+    project_points_to_metric,
 )
 
 
@@ -38,7 +49,12 @@ def prepare_model_input(
     frame: np.ndarray, width: int, height: int
 ) -> np.ndarray:
     """Return a contiguous ImageNet-normalized RGB NCHW tensor array."""
-    resized = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+    if frame.shape[:2] == (height, width):
+        resized = frame
+    else:
+        resized = cv2.resize(
+            frame, (width, height), interpolation=cv2.INTER_AREA
+        )
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     normalized = (rgb - IMAGENET_MEAN) / IMAGENET_STD
     return np.ascontiguousarray(normalized.transpose(2, 0, 1)[np.newaxis, ...])
@@ -81,16 +97,24 @@ def masks_from_probabilities(
 
 
 class LrasppInferenceNode(Node):
-    """Publish semantic lane masks from a TorchScript LR-ASPP model."""
+    """Publish audited Xbin lane outputs through the reusable TorchScript node."""
 
     def __init__(self) -> None:
         super().__init__("lane_seg_lraspp_inference")
-        # Public staging deliberately ships no learned weight. A local model
-        # path is required at launch time instead of a repository default.
-        self.declare_parameter("model_path", "")
+        package_share = Path(get_package_share_directory("lane_seg_control"))
+        self.declare_parameter(
+            "model_path",
+            str(
+                package_share
+                / "models"
+                / "xbin_centerline_model.pt"
+            ),
+        )
         self.declare_parameter("image_topic", "/wide_camera/rect/image_raw")
         self.declare_parameter("use_compressed_image", False)
         self.declare_parameter("enable_rectify", False)
+        self.declare_parameter("direct_model_rectify_enabled", False)
+        self.declare_parameter("direct_model_rectify_oversample", 1)
         self.declare_parameter("camera_yaml", "")
         self.declare_parameter("rect_balance", 0.3)
         self.declare_parameter("max_input_age_sec", 0.0)
@@ -121,6 +145,14 @@ class LrasppInferenceNode(Node):
         self.declare_parameter("publish_intermediate_topics", True)
         self.declare_parameter("diagnostics_component_counts_enabled", False)
         self.declare_parameter("direct_canonical_enabled", False)
+        self.declare_parameter("direct_centerline_enabled", False)
+        self.declare_parameter(
+            "direct_centerline_topic", "/perception/xbin_direct_centerline"
+        )
+        self.declare_parameter("direct_centerline_anchor_stride_px", 4)
+        self.declare_parameter("direct_centerline_anchor_offset_px", 2)
+        self.declare_parameter("direct_centerline_minimum_points", 3)
+        self.declare_parameter("direct_centerline_minimum_forward_m", 0.03)
         self.declare_parameter(
             "canonical_topic", "/perception/canonical_road_image"
         )
@@ -134,29 +166,31 @@ class LrasppInferenceNode(Node):
             "canonical_valid_topic", "/perception/canonical_valid_mask"
         )
         self.declare_parameter("base_frame_id", "base_footprint")
-        self.declare_parameter("src_tl_x_ratio", 472.0 / 1280.0)
-        self.declare_parameter("src_tl_y_ratio", 494.0 / 1024.0)
-        self.declare_parameter("src_tr_x_ratio", 906.0 / 1280.0)
-        self.declare_parameter("src_tr_y_ratio", 486.0 / 1024.0)
-        self.declare_parameter("src_br_x_ratio", 1272.0 / 1280.0)
-        self.declare_parameter("src_br_y_ratio", 612.0 / 1024.0)
-        self.declare_parameter("src_bl_x_ratio", 46.0 / 1280.0)
-        self.declare_parameter("src_bl_y_ratio", 622.0 / 1024.0)
-        self.declare_parameter("dst_left_ratio", 80.0 / 640.0)
-        self.declare_parameter("dst_right_ratio", 560.0 / 640.0)
+        # Public placeholders only. A real vehicle needs a separately
+        # measured camera/projective mapping.
+        self.declare_parameter("src_tl_x_ratio", 0.35)
+        self.declare_parameter("src_tl_y_ratio", 0.45)
+        self.declare_parameter("src_tr_x_ratio", 0.65)
+        self.declare_parameter("src_tr_y_ratio", 0.45)
+        self.declare_parameter("src_br_x_ratio", 0.85)
+        self.declare_parameter("src_br_y_ratio", 0.90)
+        self.declare_parameter("src_bl_x_ratio", 0.15)
+        self.declare_parameter("src_bl_y_ratio", 0.90)
+        self.declare_parameter("dst_left_ratio", 0.25)
+        self.declare_parameter("dst_right_ratio", 0.75)
         self.declare_parameter("dst_top_y_ratio", 0.0)
-        self.declare_parameter("dst_bottom_y_ratio", 479.0 / 660.0)
+        self.declare_parameter("dst_bottom_y_ratio", 0.666666667)
         self.declare_parameter("bev_width", 640)
-        self.declare_parameter("bev_height", 660)
+        self.declare_parameter("bev_height", 640)
         self.declare_parameter("bev_valid_lateral_margin_px", 0)
         self.declare_parameter("bev_valid_erode_px", 0)
         self.declare_parameter("bev_clip_to_source_polygon", False)
-        self.declare_parameter("lateral_m_per_px", 1.4 / 640.0)
-        self.declare_parameter("forward_m_per_px", 1.5 / 660.0)
+        self.declare_parameter("lateral_m_per_px", 2.0 / 640.0)
+        self.declare_parameter("forward_m_per_px", 3.0 / 640.0)
         self.declare_parameter("canonical_width", 256)
         self.declare_parameter("canonical_height", 144)
-        self.declare_parameter("canonical_lateral_range_m", 1.4)
-        self.declare_parameter("canonical_forward_range_m", 1.5)
+        self.declare_parameter("canonical_lateral_range_m", 2.0)
+        self.declare_parameter("canonical_forward_range_m", 3.0)
         self.declare_parameter("canonical_background_gray", 36)
         self.declare_parameter("canonical_line_width_px", 5)
         self.declare_parameter("canonical_white_fit_enabled", True)
@@ -176,7 +210,6 @@ class LrasppInferenceNode(Node):
         self.declare_parameter("canonical_yellow_normalize_min_area_px", 3)
         self.declare_parameter("canonical_yellow_normalize_smoothing_rows", 5)
 
-        self.bridge = CvBridge()
         self.input_width = int(self.get_parameter("input_width").value)
         self.input_height = int(self.get_parameter("input_height").value)
         self.white_class_id = int(self.get_parameter("white_class_id").value)
@@ -200,6 +233,17 @@ class LrasppInferenceNode(Node):
         self.enable_rectify = bool(
             self.get_parameter("enable_rectify").value
         )
+        self.direct_model_rectify_enabled = bool(
+            self.get_parameter("direct_model_rectify_enabled").value
+        )
+        self.direct_model_rectify_oversample = max(
+            1,
+            int(
+                self.get_parameter(
+                    "direct_model_rectify_oversample"
+                ).value
+            ),
+        )
         self.max_input_age_sec = max(
             0.0, float(self.get_parameter("max_input_age_sec").value)
         )
@@ -214,6 +258,9 @@ class LrasppInferenceNode(Node):
         self.direct_canonical_enabled = bool(
             self.get_parameter("direct_canonical_enabled").value
         )
+        self.direct_centerline_enabled = bool(
+            self.get_parameter("direct_centerline_enabled").value
+        )
         if not self.direct_canonical_enabled:
             self.publish_intermediate_topics = True
         self.base_frame_id = str(self.get_parameter("base_frame_id").value)
@@ -222,6 +269,15 @@ class LrasppInferenceNode(Node):
             self.rectifier = CameraRectifier(
                 str(self.get_parameter("camera_yaml").value),
                 float(self.get_parameter("rect_balance").value),
+            )
+        if self.direct_model_rectify_enabled and self.rectifier is None:
+            raise ValueError(
+                "direct_model_rectify_enabled requires enable_rectify=true"
+            )
+        if self.direct_model_rectify_enabled and self.output_native_resolution:
+            raise ValueError(
+                "direct_model_rectify_enabled requires "
+                "output_native_resolution=false"
             )
         self.geometry: BevGeometry | None = None
         self.geometry_input_size: tuple[int, int] | None = None
@@ -240,16 +296,12 @@ class LrasppInferenceNode(Node):
             pass
         cv2.setNumThreads(opencv_threads)
 
-        model_parameter = str(self.get_parameter("model_path").value).strip()
-        if not model_parameter:
-            raise ValueError(
-                "model_path is required; this public source release does not "
-                "include an LR-ASPP model weight"
-            )
-        model_path = Path(model_parameter).expanduser().resolve()
+        model_path = Path(
+            str(self.get_parameter("model_path").value)
+        ).expanduser().resolve()
         if not model_path.is_file():
             raise FileNotFoundError(
-                f"LR-ASPP TorchScript model not found: {model_path}"
+                f"Xbin centerline model not found: {model_path}"
             )
         model = torch.jit.load(str(model_path), map_location="cpu").eval()
         self.model = torch.jit.optimize_for_inference(model)
@@ -260,12 +312,12 @@ class LrasppInferenceNode(Node):
             output = self.model(warmup)
         if not isinstance(output, torch.Tensor) or output.ndim != 4:
             raise RuntimeError(
-                "LR-ASPP model must return an NxCxHxW tensor, "
+                "Xbin centerline model must return an NxCxHxW tensor, "
                 f"got {type(output)!r}"
             )
         if output.shape[1] <= max(self.white_class_id, self.yellow_class_id):
             raise RuntimeError(
-                f"LR-ASPP model has {output.shape[1]} classes but lane class IDs "
+                f"lane model has {output.shape[1]} classes but lane class IDs "
                 f"are {self.white_class_id}/{self.yellow_class_id}"
             )
 
@@ -309,6 +361,14 @@ class LrasppInferenceNode(Node):
             str(self.get_parameter("diagnostics_topic").value),
             output_qos,
         )
+        self.direct_centerline_pub = None
+        self.direct_centerline_sequence = 0
+        if self.direct_centerline_enabled:
+            self.direct_centerline_pub = self.create_publisher(
+                Centerline,
+                str(self.get_parameter("direct_centerline_topic").value),
+                10,
+            )
         self.canonical_pub = None
         self.canonical_white_pub = None
         self.canonical_yellow_pub = None
@@ -353,23 +413,27 @@ class LrasppInferenceNode(Node):
         self.scheduler_tick_count = 0
         self.scheduler_stop = threading.Event()
         self.scheduler_thread: threading.Thread | None = None
+        self.context.on_shutdown(self.stop_output_scheduler)
         if self.max_output_rate_hz > 0.0:
             self.scheduler_thread = threading.Thread(
                 target=self.run_output_scheduler,
-                name="lane_seg_7hz_scheduler",
+                name="lane_seg_output_scheduler",
                 daemon=True,
             )
             self.scheduler_thread.start()
         self.get_logger().info(
-            f"LR-ASPP lane segmentation ready: model={model_path}, "
+            f"Xbin centerline perception ready: model={model_path}, "
             f"input={self.input_width}x{self.input_height}, classes="
             f"background/white/yellow=0/{self.white_class_id}/{self.yellow_class_id}, "
             f"thresholds={self.white_confidence:.2f}/{self.yellow_confidence:.2f}, "
             f"threads=torch:{cpu_threads},opencv:{opencv_threads}, "
             f"output={'native' if self.output_native_resolution else 'model'}, "
             f"source={'compressed' if self.use_compressed_image else 'raw'}, "
-            f"rectify={self.enable_rectify}, direct_canonical="
-            f"{self.direct_canonical_enabled}, "
+            f"rectify={self.enable_rectify}, direct_model_rectify="
+            f"{self.direct_model_rectify_enabled}x"
+            f"{self.direct_model_rectify_oversample}, direct_canonical="
+            f"{self.direct_canonical_enabled}, direct_centerline="
+            f"{self.direct_centerline_enabled}, "
             f"scheduler={'latest-frame timer' if self.max_output_rate_hz > 0.0 else 'input'}, "
             f"rate_limit={self.max_output_rate_hz:.1f}Hz"
         )
@@ -514,11 +578,18 @@ class LrasppInferenceNode(Node):
             if frame is None:
                 raise ValueError("compressed camera payload is empty or invalid")
         else:
-            frame = self.bridge.imgmsg_to_cv2(
-                message, desired_encoding="bgr8"
-            )
+            frame = raw_image_to_bgr(message)
         if self.rectifier is not None:
-            frame = self.rectifier.rectify(frame)
+            if self.direct_model_rectify_enabled:
+                frame = self.rectifier.rectify_to_size(
+                    frame,
+                    self.input_width
+                    * self.direct_model_rectify_oversample,
+                    self.input_height
+                    * self.direct_model_rectify_oversample,
+                )
+            else:
+                frame = self.rectifier.rectify(frame)
         return frame
 
     def on_image(self, message: CameraMessage) -> None:
@@ -553,15 +624,28 @@ class LrasppInferenceNode(Node):
             if self.scheduler_stop.wait(wait_sec):
                 break
             self.scheduler_tick_count += 1
-            self.on_output_timer()
+            try:
+                self.on_output_timer()
+            except RuntimeError:
+                if self.scheduler_stop.is_set() or not rclpy.ok(
+                    context=self.context
+                ):
+                    break
+                raise
             deadline += period
             if deadline < time.monotonic() - period:
                 deadline = time.monotonic() + period
 
-    def destroy_node(self):
+    def stop_output_scheduler(self) -> None:
         self.scheduler_stop.set()
-        if self.scheduler_thread is not None:
+        if (
+            self.scheduler_thread is not None
+            and self.scheduler_thread is not threading.current_thread()
+        ):
             self.scheduler_thread.join(timeout=2.0)
+
+    def destroy_node(self):
+        self.stop_output_scheduler()
         return super().destroy_node()
 
     @staticmethod
@@ -578,9 +662,95 @@ class LrasppInferenceNode(Node):
         encoding: str,
         header: Header,
     ) -> None:
-        output = self.bridge.cv2_to_imgmsg(frame, encoding=encoding)
-        output.header = header
+        output = cv_image_to_message(frame, encoding, header)
         publisher.publish(output)
+
+    def publish_direct_centerline(
+        self,
+        message: CameraMessage,
+        yellow_mask: np.ndarray,
+        yellow_probability: np.ndarray,
+    ) -> tuple[int, float, float]:
+        """Publish metric Xbin points without creating a BEV/canonical image."""
+        if self.direct_centerline_pub is None:
+            return 0, 0.0, 0.0
+        started = time.perf_counter()
+        anchor_stride = max(
+            1,
+            int(
+                self.get_parameter(
+                    "direct_centerline_anchor_stride_px"
+                ).value
+            ),
+        )
+        anchor_offset = int(
+            self.get_parameter(
+                "direct_centerline_anchor_offset_px"
+            ).value
+        ) % anchor_stride
+        camera_points, confidences = extract_anchor_centers(
+            yellow_mask,
+            yellow_probability,
+            anchor_stride_px=anchor_stride,
+            anchor_offset_px=anchor_offset,
+        )
+        geometry = self.ensure_geometry(
+            yellow_mask.shape[1], yellow_mask.shape[0]
+        )
+        metric_points, valid_indices = project_points_to_metric(
+            camera_points,
+            geometry.matrix,
+            bev_width=geometry.width,
+            bev_height=geometry.height,
+            lateral_m_per_px=self.parameter_float("lateral_m_per_px"),
+            forward_m_per_px=self.parameter_float("forward_m_per_px"),
+            minimum_forward_m=self.parameter_float(
+                "direct_centerline_minimum_forward_m"
+            ),
+            maximum_forward_m=self.parameter_float(
+                "canonical_forward_range_m"
+            ),
+            maximum_abs_lateral_m=0.5
+            * self.parameter_float("canonical_lateral_range_m"),
+        )
+
+        output = Centerline()
+        output.header = self.output_header(message, self.base_frame_id)
+        self.direct_centerline_sequence += 1
+        output.detection_id = self.direct_centerline_sequence
+        output.track_id = 0
+        minimum_points = max(
+            3,
+            int(
+                self.get_parameter(
+                    "direct_centerline_minimum_points"
+                ).value
+            ),
+        )
+        if metric_points.shape[0] >= minimum_points:
+            for forward_m, lateral_m in metric_points:
+                point = Point()
+                point.x = float(forward_m)
+                point.y = float(lateral_m)
+                point.z = 0.0
+                output.points.append(point)
+            valid_confidences = confidences[valid_indices]
+            anchor_count = len(
+                range(anchor_offset, yellow_mask.shape[0], anchor_stride)
+            )
+            coverage = metric_points.shape[0] / max(1, anchor_count)
+            output.confidence = float(
+                np.mean(valid_confidences) * coverage
+            )
+        else:
+            output.confidence = 0.0
+        output.source = "xbin_direct"
+        self.direct_centerline_pub.publish(output)
+        maximum_forward = (
+            float(metric_points[-1, 0]) if metric_points.shape[0] else 0.0
+        )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        return len(output.points), maximum_forward, elapsed_ms
 
     def process_image(self, message: CameraMessage) -> None:
         callback_started = time.perf_counter()
@@ -613,7 +783,7 @@ class LrasppInferenceNode(Node):
                 logits = self.model(tensor)
                 probabilities = self.torch.softmax(logits, dim=1)[0].cpu().numpy()
         except Exception as exc:
-            self.get_logger().error(f"LR-ASPP inference failed: {exc}")
+            self.get_logger().error(f"lane model inference failed: {exc}")
             return
 
         white_small, yellow_small = masks_from_probabilities(
@@ -651,6 +821,14 @@ class LrasppInferenceNode(Node):
             white = white_small
             yellow = yellow_small
         elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+        direct_path_count, direct_path_forward_m, direct_path_ms = (
+            self.publish_direct_centerline(
+                message,
+                yellow_small,
+                probabilities[self.yellow_class_id],
+            )
+        )
 
         canonical_ms = 0.0
         if self.direct_canonical_enabled:
@@ -754,18 +932,9 @@ class LrasppInferenceNode(Node):
                 output_frame, 0.45, overlay, 0.55, 0.0
             )
             debug[selected] = blended[selected]
-            cv2.putText(
-                debug,
-                f"LR-ASPP {elapsed_ms:.1f}ms",
-                (12, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.75,
-                (40, 40, 255),
-                2,
-                cv2.LINE_AA,
+            debug_message = cv_image_to_message(
+                debug, "bgr8", camera_header
             )
-            debug_message = self.bridge.cv2_to_imgmsg(debug, encoding="bgr8")
-            debug_message.header = camera_header
             self.debug_pub.publish(debug_message)
             self.perception_debug_pub.publish(debug_message)
             self.last_debug_bucket = debug_bucket
@@ -800,18 +969,24 @@ class LrasppInferenceNode(Node):
                 float(input_age_sec * 1000.0),
                 float(self.replaced_input_count),
                 float(self.stale_input_count),
+                float(direct_path_count),
+                float(direct_path_forward_m),
+                float(direct_path_ms),
             ]
             self.diagnostics_pub.publish(diagnostics)
 
         now = time.monotonic()
         if now - self.last_log_time >= 5.0:
             self.get_logger().info(
-                f"LR-ASPP lane segmentation: {elapsed_ms:.1f}ms, "
+                f"lane perception: {elapsed_ms:.1f}ms, "
                 f"decode_rect={decode_ms:.1f}ms, canonical="
                 f"{canonical_ms:.1f}ms, total={callback_elapsed_ms:.1f}ms, "
                 f"source_age={input_age_sec * 1000.0:.1f}ms, "
                 f"white_px={np.count_nonzero(white_small)}, "
                 f"yellow_px={np.count_nonzero(yellow_small)}"
+                f", direct_points={direct_path_count}, "
+                f"direct_forward={direct_path_forward_m:.2f}m, "
+                f"direct={direct_path_ms:.2f}ms"
             )
             self.last_log_time = now
 

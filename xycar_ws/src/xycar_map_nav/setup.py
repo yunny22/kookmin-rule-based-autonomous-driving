@@ -1,7 +1,9 @@
+from glob import glob
+import os
 from setuptools import find_packages, setup
 
 
-package_name = "lane_seg_control"
+package_name = "xycar_map_nav"
 
 setup(
     name=package_name,
@@ -10,17 +12,18 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
-        ("share/" + package_name + "/models", ["models/README.md"]),
+        (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
     maintainer="TeamKAI",
     maintainer_email="team.kai@example.com",
-    description="Sanitized Xbin centerline perception interface for a portfolio release.",
+    description="Sanitized final mission arbitration and command-gate source.",
     license="UNLICENSED",
     entry_points={
         "console_scripts": [
-            "lraspp_inference_node = lane_seg_control.lraspp_inference_node:main",
+            "sequential_hybrid_driver = xycar_map_nav.sequential_hybrid_driver:main",
+            "space_drive_gate = xycar_map_nav.space_drive_gate:main",
         ],
     },
 )

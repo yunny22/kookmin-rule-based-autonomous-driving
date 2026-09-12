@@ -1,108 +1,208 @@
 # Kookmin Final – Rule-based Autonomous Driving
 
 This repository is provided for portfolio and research demonstration purposes.
-No separate open-source reuse license is granted; third-party dependencies keep
-their own terms.
+It is a curated, sanitized source subset of TeamKAI's final Kookmin autonomous
+driving competition stack. It is not a vehicle-ready deployment package and
+does not grant a separate open-source reuse licence.
 
 ## Overview
 
-This is a curated public source release for the real-vehicle Rule-based Autonomous Driving System prepared for the Kookmin autonomous-driving competition final. It contains the audited centerline-perception and vehicle-control path only. Competition assets, model weights, calibration files, bags, media, and source that was not verified as part of this path are intentionally absent.
+The final competition lane-driving path used a direct **Xbin yellow-centerline**
+model. Its centerline points were converted directly to a vehicle-frame metric
+path on /perception/xbin_direct_centerline; the controller then produced a
+RULE candidate through fused Pure Pursuit and Stanley control.
+
+The complete team stack combined that normal-driving candidate with traffic,
+shortcut, cone, and YOLO/LiDAR vehicle-avoidance candidates. The final command
+was selected by a mission/lap state machine, sent to a shadow command topic,
+then gated before /xycar_motor reached the external VESC interface.
+
+The source and execution wiring were audited against
+[TeamKAI main at 0ae216c](https://github.com/steveandy-sudo/kookmin_autonomous_competition_teamKAI/tree/0ae216c6255e25404560948f3e6d5479a7a7ba8f).
+See [PUBLIC_RELEASE_NOTES.md](PUBLIC_RELEASE_NOTES.md) for provenance and
+exclusions.
 
 ## Motivation
 
-After the preceding RL / Sim-to-Real effort could not reduce the high-speed simulation-to-real gap sufficiently within the competition schedule, the final architecture was reorganized as a Rule-based system that could be explicitly tuned and verified on the vehicle. Lane information is converted into a vehicle-frame target path, then a fused Stanley and Pure Pursuit controller publishes vehicle commands. The repository is a reviewable source release, not a vehicle-ready deployment package.
+The preceding learning and Sim-to-Real work exposed a high-speed transfer gap
+that could not be reduced sufficiently within the competition schedule. The
+final approach therefore used an explicitly tunable, real-vehicle Rule-based
+architecture. This release documents the final architecture; it does not
+present Rule-based driving as a replacement for the research value of the
+preceding learning experiments.
 
-## System Architecture
+## Final System Architecture
 
-```text
-camera image
-  -> LR-ASPP semantic segmentation
-  -> white-boundary / yellow-centerline masks
-  -> BEV and canonical-road rendering
-  -> centerline target path
-  -> adaptive Stanley + Pure Pursuit fusion
-  -> shadow vehicle command (motor output disabled by default)
-```
+~~~text
+Wide camera
+  ├─ Xbin yellow-centerline perception
+  │    └─ vehicle-frame metric centerline/path
+  │         └─ Pure Pursuit + Stanley → RULE candidate
+  ├─ YOLO object detections
+  │    └─ traffic state / vehicle mission input
+  └─ LR-ASPP shortcut/W1 perception (team subsystem)
+       └─ SHORTCUT candidate
 
-The public launcher composes the two audited ROS 2 packages:
+LiDAR
+  ├─ cone-boundary input (team subsystem) → CONE candidate
+  └─ vehicle distance / free-space input → AVOIDANCE candidate
 
-- `lane_seg_control`: perception and canonical-road generation.
-- `xycar_rule_drive`: target-path extraction and fused steering control.
+TRAFFIC > SHORTCUT > CONE > YOLO + LiDAR AVOIDANCE > RULE
+  └─ sequential_hybrid_driver
+       └─ /hybrid_gate/xycar_motor_shadow
+            └─ space_drive_gate
+                 └─ /xycar_motor → external VESC driver
+~~~
 
-It is a sanitized composition of the `driver_mode=rule` branch in the original mixed final launcher. It does **not** include the original launcher because that file also selects excluded RL and Hybrid paths.
+In the audited competition script, sequential_hybrid_driver was started with
+drive_enabled=false, so it emitted the shadow candidate only. The separately
+started space_drive_gate was the actual /xycar_motor publisher. The VESC
+driver is an external hardware package and is not copied here.
 
-## Centerline Perception
+## Xbin Lane Perception
 
-The audited source implements **LR-ASPP** TorchScript semantic segmentation, not an Xbin model. The source code contains no Xbin class or module, so this repository does not describe it as an Xbin reimplementation.
+lane_seg_control contains the audited direct-centerline path:
 
-LR-ASPP produces white-boundary and yellow-centerline masks. The canonical adapter warps those masks to a bird's-eye representation and renders a canonical road image for the controller. A compatible TorchScript model must be supplied locally through `model_path`; the original launch convention used `kookmin_lane_lraspp_mbv3s_256x144.pt`, but no weight is published here.
+1. The Xbin centerline model receives the wide-camera image.
+2. Each confident yellow-centerline row yields an x-bin center estimate.
+3. xbin_direct_centerline.py projects those image points with a local
+   projective mapping into [forward_m, lateral_m] coordinates.
+4. The perception node publishes the metric points as
+   /perception/xbin_direct_centerline.
+5. canonical_stanley_pursuit_driver consumes that topic as its external
+   path input.
 
-## Vehicle Control
+The model weight, camera calibration, and measured projective geometry are
+not published. The public source has safe example defaults only.
+The generic file name lraspp_inference_node.py was retained from the shared
+TorchScript interface; the audited final launch supplied the Xbin model and
+enabled its direct-centerline path.
 
-`canonical_stanley_pursuit_driver.py` derives a Pure Pursuit steering term from a look-ahead target and a Stanley term from cross-track and heading error. It adaptively blends the terms: straight-path and departure guards modify the Pure Pursuit weight, and opposing terms are handled before smoothing and rate limiting. This is a fused controller, not a fixed mode switch.
+### LR-ASPP's final role
 
-The launcher sets `drive_enabled:=false`. It publishes only to the shadow-command path until a locally calibrated vehicle configuration and an explicit operator decision enable motor output.
+LR-ASPP was **not** the final normal lane-driving perception path. In the
+audited final launcher it was supplied to the shortcut/W1 subsystem. That
+subsystem was developed by another team member and is represented here only by
+its candidate-command interface, not by copied perception source.
 
-## Mission Integration
+## RULE Controller
 
-This curated public release preserves the verified final perception-and-control boundary. The mixed original final launcher proves that the rule branch selected these two packages, but it does not identify a self-contained competition-day traffic, obstacle, stop-line, or cone mission stack.
+xycar_rule_drive/canonical_stanley_pursuit_driver.py builds a connected metric
+path and computes:
 
-`track_drive_sve` identifies itself as a preliminary Gazebo package, while `study/my_rule` is SLAM-coupled and has local working-tree changes. They are intentionally not represented as final mission modules here. The competition-day mission integration remains **UNKNOWN** pending a verified final launch command or deployment record.
+- a Pure Pursuit term from a look-ahead point;
+- a Stanley term from cross-track and heading error; and
+- a fused steering command with straight/curve handling, smoothing and
+  steering-rate limiting.
 
-## My Contribution
+The project used standard Pure Pursuit and Stanley ideas; the contribution was
+their vehicle-side implementation, parameter tuning, and fused integration,
+not a claim of inventing either algorithm. The published steering-map default
+is a neutral placeholder. It must not be used as a vehicle calibration.
 
-Source-history evidence attributes portions of the LR-ASPP/canonical pipeline and Stanley–Pure Pursuit integration to the local author identity `as`. That is **PERSONAL evidence for source contributions**, not proof that every final-system module was implemented individually.
+## Traffic and Vehicle Avoidance
 
-- **PERSONAL evidence:** core perception/canonical and fused-control source contributions in the audited commit history.
-- **CO-DEVELOPED:** integration of perception and control into the competition Rule path.
-- **TEAM:** final vehicle system, competition operation, and any result that depends on components omitted from this public release.
+xycar_map_nav contains the final selector-side logic:
 
-## Competition / Validation
+- traffic_light_control.py latches stop/go/left-arrow state from YOLO
+  detections and supplies a traffic mission decision.
+- yolo_lidar_avoidance.py tracks a YOLO vehicle observation, uses LiDAR
+  distance and side/free-space information, requests a lateral avoidance
+  offset, and returns to the RULE path after the obstacle clears.
+- sequential_hybrid_driver.py combines those mission states with the RULE
+  candidate, shortcut event and cone candidate.
 
-The source was selected from commit `678522e99f6527fa151796686b3c3574df55e18f` in the local TeamKAI repository because its mixed final launcher explicitly exposes a Rule branch that includes the retained perception and controller packages. This repository makes no claim about competition ranking, completion rate, real-vehicle performance, or exact inference frequency.
+The public subset intentionally does **not** include YOLO model weights,
+camera-to-LiDAR calibration, object-detector runtime code, or a ready-to-run
+vehicle configuration.
 
-## Limitations
+## Mission Arbitration
 
-- A local TorchScript LR-ASPP model is required and is not supplied.
-- Camera geometry, steering calibration, speed settings, and vehicle-interface parameters are hardware-specific and must be measured locally.
-- Motor output is disabled by default.
-- The public source does not include an audited final traffic/obstacle/cone mission stack.
-- Post-competition improvement should balance perception accuracy with execution frequency, expand representative data, and validate controller parameters on the actual vehicle.
+The audited sequential_hybrid_driver.py applies the following precedence:
 
-## Repository Structure
+~~~text
+TRAFFIC
+> SHORTCUT
+> CONE
+> YOLO + LiDAR AVOIDANCE
+> RULE
+~~~
 
-```text
+Traffic can stop the vehicle; shortcut and cone candidates can replace the
+RULE command; vehicle avoidance retains the RULE steering path while applying
+an avoidance offset and speed constraint. The selector publishes the chosen
+result to /hybrid_gate/xycar_motor_shadow. space_drive_gate.py provides the
+final operator-gated output to /xycar_motor.
+
+## Team Scope and My Contribution
+
+### Taeyun Kim
+
+- Implemented and integrated Xbin lane perception, yellow-centerline
+  extraction, and direct metric-path generation.
+- Implemented and tuned the Pure Pursuit–Stanley fused RULE controller for
+  vehicle path tracking.
+- Implemented traffic-light perception/mission logic and traffic control.
+- Implemented YOLO + LiDAR vehicle-avoidance logic, recovery handling, and
+  its integration with the RULE path.
+- Implemented mission/lap state and priority arbitration, then integrated the
+  final command flow, real vehicle, and tuning work.
+
+### Other Team Members
+
+- The shortcut/W1 perception and its driving subsystem were developed by a
+  team member.
+- The cone perception and cone-driving subsystem were developed by a team
+  member.
+
+Those two subsystems were integrated into the final mission stack, but their
+underlying algorithms are not claimed here as Taeyun Kim's individual work.
+
+## Team Result
+
+TeamKAI's final main README records a **three-lap integrated completion on
+2026-08-23**. This is presented as a team result from the source provenance;
+this public subset contains no independent bag, video, or benchmark artifact
+for replay.
+
+## Public Subset
+
+~~~text
 xycar_ws/src/
-├── lane_seg_control/      # LR-ASPP masks and canonical-road generation
-└── xycar_rule_drive/      # Stanley + Pure Pursuit fused controller
-```
+├── lane_seg_control/    # Xbin path extraction and ROS interface
+├── xycar_rule_drive/    # fused Pure Pursuit–Stanley controller
+└── xycar_map_nav/       # traffic, avoidance, arbitration, output gate
+~~~
 
-`PUBLIC_RELEASE_NOTES.md` records the source-selection decision, exclusions, and provenance boundaries.
+The public xbin_rule_shadow.launch.py demonstrates only the Xbin-to-RULE
+boundary and keeps physical motor output disabled. It does not start a final
+competition run because the model, calibration, hardware interface, shortcut
+module and cone module are intentionally excluded.
 
-## Environment
+## Environment and Validation
 
-- Ubuntu with ROS 2 Humble
-- Python 3, `numpy`, `opencv-python`, `PyYAML`, and PyTorch compatible with the supplied TorchScript model
-- ROS dependencies declared in both package manifests
-- The external `kaiev26_msgs` message package, supplied separately by the team environment
+- ROS 2 Humble source layout
+- Python 3, NumPy, OpenCV, PyTorch and the ROS dependencies declared in the
+  package manifests
+- External TeamKAI message and hardware packages, supplied separately
 
-The external message package is not copied here because it belongs to a separate vehicle/SITL interface source set.
-
-## How to Run
-
-```bash
+~~~bash
 cd xycar_ws
 source /opt/ros/humble/setup.bash
-colcon build --packages-select lane_seg_control xycar_rule_drive
+colcon build --packages-select lane_seg_control xycar_rule_drive xycar_map_nav
 source install/setup.bash
 
-ros2 launch xycar_rule_drive final_rule_only.launch.py \
-  model_path:=/absolute/path/to/local-lraspp-model.pt \
-  image_topic:=/camera/topic
-```
+ros2 launch xycar_map_nav xbin_rule_shadow.launch.py \
+  model_path:=/absolute/path/to/authorised/xbin_centerline_model.pt
+~~~
 
-The launch is intentionally safe by default: `drive_enabled:=false`. To use a real vehicle, provide a locally measured, non-public parameter file based on `config/vehicle.example.yaml`, review the vehicle interface, and make an explicit operator decision before enabling output. This repository does not provide a ready-to-drive configuration.
+This command is a source-interface review aid, not a ready-to-drive vehicle
+instruction. Provide locally authorised model, calibration, message interfaces
+and safety validation before any hardware integration.
 
-## Team / Credits
+## Credits
 
-The source was audited from the [TeamKAI competition repository](https://github.com/steveandy-sudo/kookmin_autonomous_competition_teamKAI). This curated public release preserves only an attributable, reviewable slice of a broader team system. The original repository history and any team-level attribution remain available for provenance and historical context.
+This release derives from the
+[TeamKAI competition repository](https://github.com/steveandy-sudo/kookmin_autonomous_competition_teamKAI).
+ROS 2, NumPy, OpenCV, PyTorch, Ultralytics, and ROS message/interface packages
+are external dependencies; their source is not vendored or re-licensed here.

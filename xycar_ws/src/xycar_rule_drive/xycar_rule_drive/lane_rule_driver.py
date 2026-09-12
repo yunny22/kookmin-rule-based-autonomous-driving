@@ -6,12 +6,7 @@ from bisect import bisect_right
 from typing import Sequence
 
 from geometry_msgs.msg import Point
-try:
-    from kaiev26_msgs.msg import Centerline, RoadSegment, RoadSegmentArray
-except ModuleNotFoundError:
-    # Keep pure geometry and interpolation utilities importable for review and
-    # testing. Runtime use still requires the team's message-interface package.
-    Centerline = RoadSegment = RoadSegmentArray = None
+from kaiev26_msgs.msg import Centerline, RoadSegment, RoadSegmentArray
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
@@ -151,18 +146,13 @@ def propagate_path(
 
 class LaneRuleDriver(Node):
     def __init__(self) -> None:
-        if Centerline is None:
-            raise RuntimeError(
-                "kaiev26_msgs is required to run LaneRuleDriver; install the "
-                "team message-interface package in the ROS environment"
-            )
         super().__init__("xycar_lane_rule_driver")
         self.declare_parameter("road_segments_topic", "/perception/road_segments")
         self.declare_parameter("centerline_topic", "/perception/centerline")
         self.declare_parameter("centerline_fallback_enabled", True)
         self.declare_parameter("motor_topic", "/xycar_motor")
         self.declare_parameter("shadow_motor_topic", "/xycar_motor_shadow")
-        self.declare_parameter("drive_enabled", False)
+        self.declare_parameter("drive_enabled", True)
         self.declare_parameter("steering_only", False)
         self.declare_parameter("target_path_topic", "/rule_drive/target_path")
         self.declare_parameter("debug_markers_topic", "/rule_drive/debug_markers")
@@ -180,20 +170,45 @@ class LaneRuleDriver(Node):
         self.declare_parameter("wheel_base_m", 0.32)
         self.declare_parameter("control_point_x_m", -0.08)
         self.declare_parameter("steering_gain_rad_per_cmd", -0.0068)
-        # The competition vehicle's measured steering map is intentionally
-        # omitted from the public release. Supply a local calibration to use
-        # real motor output.
-        self.declare_parameter("use_measured_steering_map", False)
+        self.declare_parameter("use_measured_steering_map", True)
         self.declare_parameter(
             "steering_map_commands",
-            [-1.0, 0.0, 1.0],
+            [
+                -42.0,
+                -40.0,
+                -35.0,
+                -30.0,
+                -20.0,
+                -10.0,
+                0.0,
+                10.0,
+                20.0,
+                30.0,
+                35.0,
+                40.0,
+                42.0,
+            ],
         )
         self.declare_parameter(
             "steering_map_curvatures",
-            [1.0, 0.0, -1.0],
+            [
+                1.502435,
+                1.383494,
+                1.174860,
+                0.922781,
+                0.552809,
+                0.194230,
+                0.0,
+                -0.556883,
+                -0.959829,
+                -1.369323,
+                -1.601706,
+                -1.853397,
+                -1.939236,
+            ],
         )
-        self.declare_parameter("angle_command_min", -1.0)
-        self.declare_parameter("angle_command_max", 1.0)
+        self.declare_parameter("angle_command_min", -42.0)
+        self.declare_parameter("angle_command_max", 42.0)
         self.declare_parameter("lookahead_distance_m", 1.20)
         self.declare_parameter("min_lookahead_x_m", 0.45)
         self.declare_parameter("speed_command", 8.0)
