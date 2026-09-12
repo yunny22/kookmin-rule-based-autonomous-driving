@@ -6,7 +6,7 @@ their own terms.
 
 ## Overview
 
-This is a public-source staging repository for the real-vehicle Rule-based Autonomous Driving System prepared for the Kookmin autonomous-driving competition final. It contains the audited centerline-perception and vehicle-control path only. Competition assets, model weights, calibration files, bags, media, and source that was not verified as part of this path are intentionally absent.
+This is a curated public source release for the real-vehicle Rule-based Autonomous Driving System prepared for the Kookmin autonomous-driving competition final. It contains the audited centerline-perception and vehicle-control path only. Competition assets, model weights, calibration files, bags, media, and source that was not verified as part of this path are intentionally absent.
 
 ## Motivation
 
@@ -45,7 +45,7 @@ The launcher sets `drive_enabled:=false`. It publishes only to the shadow-comman
 
 ## Mission Integration
 
-This staging release preserves the verified final perception-and-control boundary. The mixed original final launcher proves that the rule branch selected these two packages, but it does not identify a self-contained competition-day traffic, obstacle, stop-line, or cone mission stack.
+This curated public release preserves the verified final perception-and-control boundary. The mixed original final launcher proves that the rule branch selected these two packages, but it does not identify a self-contained competition-day traffic, obstacle, stop-line, or cone mission stack.
 
 `track_drive_sve` identifies itself as a preliminary Gazebo package, while `study/my_rule` is SLAM-coupled and has local working-tree changes. They are intentionally not represented as final mission modules here. The competition-day mission integration remains **UNKNOWN** pending a verified final launch command or deployment record.
 
@@ -105,4 +105,4 @@ The launch is intentionally safe by default: `drive_enabled:=false`. To use a re
 
 ## Team / Credits
 
-The source was audited from the [TeamKAI competition repository](https://github.com/steveandy-sudo/kookmin_autonomous_competition_teamKAI). This staging repository preserves only an attributable, reviewable slice of a broader team system. The original repository history and any team-level attribution should be consulted before publication or reuse.
+The source was audited from the [TeamKAI competition repository](https://github.com/steveandy-sudo/kookmin_autonomous_competition_teamKAI). This curated public release preserves only an attributable, reviewable slice of a broader team system. The original repository history and any team-level attribution remain available for provenance and historical context.
